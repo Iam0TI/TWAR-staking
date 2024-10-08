@@ -3,7 +3,7 @@
 pragma solidity 0.8.27;
 
 import {IERC20} from "./interface/IERC20.sol";
-import {TwarStakingError, TwarStakingEvent} from "./utils.sol";
+import {TwarStakingError, TwarStakingEvent, TwarStakingLib} from "./utils.sol";
 
 contract TwarStaking {
     IERC20 public immutable stakingToken;
@@ -11,14 +11,14 @@ contract TwarStaking {
 
     address public owner;
 
-    // Duration of rewards to be paid out (in seconds)
-    uint256 public stakingDuration;
+    // Duration of rewards to be paid for -> seconds
+    uint256 public rewardDuraton;
 
-    // The Time Staking starts(block.timestamp) +  duration
-    uint256 public stakingPeriod;
-    // Minimum of last updated time and reward finish time
+    // The Time Staking (block.timestamp) +  duration
+    uint256 public rewardFinishTime;
+    // Minimum of  block.timestamp and rewardFinishTime
     uint256 public lastRewardUpdatedTIme;
-    // Reward to be paid out per second
+    // Reward to be paid  per second   
     uint256 public rewardRate;
     // Amount of   Staking tokens staked
     uint256 public totalAmountStaked;
@@ -41,11 +41,12 @@ contract TwarStaking {
     }
 
       modifier updateReward(address _account) {
-        rewardPerTokenStored = rewardPerToken();
+        
+        rewardPerTokenStored = TwarStakingLib.rewardPerToken(totalAmountStaked,rewardPerTokenStored,rewardRate,lastTimeForReward(),lastRewardUpdatedTIme);
         lastRewardUpdatedTIme = lastTimeForReward();
 
         if (_account != address(0)) {
-            rewards[_account] = earned(_account);
+            rewards[_account] = TwarStakingLib.earned(usersBalance[_account],rewardPerTokenStored,userRewardPerTokenPaid[_account],rewards[_account]);
             userRewardPerTokenPaid[_account] = rewardPerTokenStored;
         }
 
@@ -76,8 +77,8 @@ contract TwarStaking {
         stakingToken.transfer(msg.sender, _amount);
     }
 
-    function withdrawRewards()  public updateReward(msg.sender) {
-        uint256 reward = rewards[msg.sender];
+    function withdrawRewards()  public updateReward(msg.sender) returns(uint256 reward) {
+      reward = rewards[msg.sender];
 
         require(reward > 0, TwarStakingError.Reward_ZeroAmount());
 
@@ -88,59 +89,71 @@ contract TwarStaking {
     }
 
     function exit() public {
-        withdrawRewards();
+       uint256 reward = withdrawRewards();
         withdraw(usersBalance[msg.sender]);
+       emit TwarStakingEvent.ExitPool(msg.sender,usersBalance[msg.sender],reward);
     }
 
     function updateRewardRate(uint256 _poolReward) external onlyOwner updateReward(address(0))  {
-        require(stakingDuration > 0, TwarStakingError.DurationisZero());
+        require(rewardDuraton > 0, TwarStakingError.DurationisZero());
         rewardToken.transferFrom(msg.sender, address(this), _poolReward);
-        //  for case when stakingPeriod  is 0 or  as ended
-        if (block.timestamp > stakingPeriod) {
-            rewardRate = _poolReward / stakingDuration;
+        //  for case when rewardFinishTime  is 0 or  as ended
+        if (block.timestamp > rewardFinishTime) {
+            rewardRate = _poolReward / rewardDuraton;
+            if(rewardFinishTime==0) emit TwarStakingEvent.StakingStarted(msg.sender,_poolReward,rewardDuraton);
         }
         // if a staking period is till active
         else {
-            uint256 remainingReward = rewardRate * (stakingPeriod - block.timestamp);
+            uint256  remainingPeriod = rewardFinishTime - block.timestamp;
+            uint256 remainingReward = rewardRate * remainingPeriod ;
 
-            rewardRate = (remainingReward + _poolReward) / stakingDuration;
+            rewardRate = (remainingReward + _poolReward) / rewardDuraton;
+
+            emit TwarStakingEvent.StakingRewardIncreased(msg.sender,rewardRate,remainingPeriod);
         }
 
+        //Ensure the provided reward amount is not more than the balance in the contract.
         require(rewardRate > 0, TwarStakingError.RewardRate_ZeroAmount());
-        uint256 poolrewardAmount = rewardRate * stakingDuration;
-        require(poolrewardAmount <= rewardToken.balanceOf(address(this)), TwarStakingError.RewardRate_ZeroAmount());
+        uint256 poolrewardAmount = rewardRate * rewardDuraton;
+        require(poolrewardAmount <= rewardToken.balanceOf(address(this)), TwarStakingError.PoolReward_TooMuch());
 
-        stakingPeriod = stakingDuration + block.timestamp;
+        rewardFinishTime = rewardDuraton + block.timestamp;
         lastRewardUpdatedTIme = block.timestamp;
+
     }
 
-    function setStakingDuration(uint256 _duration) external onlyOwner {
+    function setRewardDuraton(uint256 _duration) external onlyOwner {
         require(_duration > 0, TwarStakingError.DurationisZero());
 
-        require(stakingPeriod < block.timestamp, TwarStakingError.StakingIsActive());
+        require(rewardFinishTime < block.timestamp, TwarStakingError.StakingIsActive());
 
-        stakingDuration = _duration;
+        rewardDuraton = _duration;
     }
 
-    function earned(address _account) public view returns (uint256) {
+function earned (address _account) external view returns (uint256 earnings){
+    uint256 rewardPerToken = TwarStakingLib.rewardPerToken(totalAmountStaked,rewardPerTokenStored,rewardRate,lastTimeForReward(),lastRewardUpdatedTIme);
+       
+  earnings =  TwarStakingLib.earned(usersBalance[_account],rewardPerToken,userRewardPerTokenPaid[_account],rewards[_account]);
+}
+    // function earned(address _account) public view returns (uint256) {
 
-        return ((usersBalance[_account] * (rewardPerToken() - userRewardPerTokenPaid[_account])) / 1e18)
-            + rewards[_account];
-    }
+    //     return ((usersBalance[_account] * (rewardPerToken() - userRewardPerTokenPaid[_account])) / 1e18)
+    //         + rewards[_account];
+    // }
 
     // rewardpertoken is 0 when totalAmountStaked  is 0  and when totalAmountStaked is not 0
     // then  rewardpertoken = RJ =  RJ0 + R/T (J-J0) where J is in seconds
-    function rewardPerToken() public view returns (uint256) {
-        if (totalAmountStaked == 0){
-            return rewardPerTokenStored;
-        }else {
-            rewardPerTokenStored + (rewardRate * (lastTimeForReward()- lastRewardUpdatedTIme) * 1e18)/totalAmountStaked;
-            }
-    }
+    // function rewardPerToken() public view returns (uint256) {
+    //     if (totalAmountStaked == 0){
+    //         return rewardPerTokenStored;
+    //     }else {
+    //         rewardPerTokenStored + (rewardRate * (lastTimeForReward()- lastRewardUpdatedTIme) * 1e18)/totalAmountStaked;
+    //         }
+    //}
   
 
      function lastTimeForReward() public view returns (uint256) {
-        return _min(stakingPeriod, block.timestamp);
+        return _min(rewardFinishTime, block.timestamp);
     }
 
     function _min(uint256 x, uint256 y) private pure returns (uint256) {
