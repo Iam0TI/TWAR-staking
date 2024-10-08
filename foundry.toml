@@ -4,3 +4,7 @@ out = "out"
 libs = ["lib"]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[dependencies]
+"@openzeppelin-contracts" = "5.1.0-rc.0"
+solmate = "6.7.0"
